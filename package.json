@@ -1,6 +1,6 @@
 {
   "name": "sirelay",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "Personal residential fetch network — zero-dependency coordinator + cross-platform agent",
   "main": "coordinator.js",

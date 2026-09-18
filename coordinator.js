@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 
 // ==========================================
 // Configuration

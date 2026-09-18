@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.4.0";
 const REPO = process.env.SIRELAY_REPO || "sitechfromgeorgia/sirelay";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
