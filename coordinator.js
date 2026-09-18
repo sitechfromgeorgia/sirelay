@@ -91,6 +91,12 @@ const server = http.createServer(async (req, res) => {
     if (!url || !/^https?:\/\//.test(url)) return json(400, { ok: false, error: "bad url" });
     if (!hostAllowed(url)) return json(403, { ok: false, error: "host not in allowlist" });
 
+    // Fail fast when no agent is online (callers chain us behind other
+    // fetchers — a 25s wait for nothing would poison the chain)
+    const now = Date.now();
+    const online = [...nodes.values()].some((ts) => now - ts < NODE_TIMEOUT);
+    if (!online) return json(503, { ok: false, error: "no agents online" });
+
     const id = String(nextId++);
     const result = await new Promise((resolve) => {
       const job = { id, url, opts: { headers: body.headers || {}, method: body.method || "GET" }, created: Date.now(), resolve };
@@ -120,17 +126,32 @@ const server = http.createServer(async (req, res) => {
       pending.taken = node;
       return json(200, { job: { id: pending.id, url: pending.url, opts: pending.opts } });
     }
-    // long-poll: hold the request up to 20s
+    // long-poll: hold the request up to 20s — with cleanup on disconnect
+    // (a stale waiter firing into a dead socket crashed with
+    // ERR_HTTP_HEADERS_SENT and killed the coordinator)
     await new Promise((resolve) => {
-      const timer = setTimeout(resolve, 20_000);
-      agentWaiters.push((job) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
         clearTimeout(timer);
-        json(200, { job: { id: job.id, url: job.url, opts: job.opts } });
-        job.taken = node;
+        const i = agentWaiters.indexOf(waiter);
+        if (i >= 0) agentWaiters.splice(i, 1);
         resolve();
-      });
+      };
+      const waiter = (job) => {
+        finish();
+        if (!res.writableEnded && !res.destroyed) {
+          job.taken = node;
+          json(200, { job: { id: job.id, url: job.url, opts: job.opts } });
+        }
+        // else: agent vanished — job stays untaken for another agent
+      };
+      const timer = setTimeout(finish, 20_000);
+      req.on("close", finish);
+      agentWaiters.push(waiter);
     });
-    if (!res.writableEnded) res.writeHead(204).end();
+    if (!res.writableEnded && !res.destroyed) res.writeHead(204).end();
     return;
   }
 
