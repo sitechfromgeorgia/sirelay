@@ -78,6 +78,38 @@ This seamlessly bypasses:
 
 ### Quickstart Guide
 
+#### 0. Agent on a new machine — copy-paste per OS
+
+**Windows (PowerShell):**
+```powershell
+mkdir $env:USERPROFILE\.sirelay; cd $env:USERPROFILE\.sirelay
+irm https://github.com/sitechfromgeorgia/sirelay/releases/latest/download/sirelay.js -OutFile sirelay.js
+# create sirelay.config.json (get server + your machine key from the network admin):
+notepad sirelay.config.json
+node sirelay.js
+```
+
+**Linux:**
+```bash
+mkdir -p ~/.sirelay && cd ~/.sirelay
+curl -fsSL https://github.com/sitechfromgeorgia/sirelay/releases/latest/download/sirelay.js -o sirelay.js
+nano sirelay.config.json   # {"server":"http://COORDINATOR:8123","key":"YOUR_KEY","name":"my-machine"}
+node sirelay.js
+```
+
+**macOS:**
+```bash
+mkdir -p ~/.sirelay && cd ~/.sirelay
+curl -fsSL https://github.com/sitechfromgeorgia/sirelay/releases/latest/download/sirelay.js -o sirelay.js
+nano sirelay.config.json   # same format as Linux
+node sirelay.js
+```
+
+> 💡 **Fully automatic installs** (hidden background start + autostart on boot
+> + one-click): generate a personal installer with `gen-installer.py`
+> (Windows `.bat` / Linux `.sh` / macOS `.command`) — it embeds the machine's
+> unique key and sets up Task Scheduler / systemd / launchd for you.
+
 #### 1. Coordinator Setup (VPS)
 
 Create `/root/.sirelay-nodes.json` (chmod 600) with per-node machine keys:
