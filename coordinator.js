@@ -164,14 +164,6 @@ export function verifyAuth(req, expectedNode = null) {
   }
 
   // Node key check (has agent role: can poll and report results)
-  if (expectedNode) {
-    const registeredKey = nodeKeys[expectedNode];
-    if (registeredKey && safeCompare(token, registeredKey)) {
-      return { role: "agent", node: expectedNode };
-    }
-    return null;
-  }
-
   for (const [name, registeredKey] of Object.entries(nodeKeys)) {
     if (typeof registeredKey === "string" && safeCompare(token, registeredKey)) {
       return { role: "agent", node: name };
@@ -515,25 +507,30 @@ setInterval(() => {
 }, 30_000).unref();
 
 // ==========================================
-// HTTP Request Helpers
-// ==========================================
 function readBody(req, maxLimit = CONFIG.MAX_BODY) {
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
+    let exceeded = false;
     req.on("data", (chunk) => {
+      if (exceeded) return;
       size += chunk.length;
       if (size > maxLimit) {
+        exceeded = true;
         const err = new Error("payload_too_large");
         err.code = "PAYLOAD_TOO_LARGE";
-        req.destroy(err);
+        req.resume();
         reject(err);
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", (err) => reject(err));
+    req.on("end", () => {
+      if (!exceeded) resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => {
+      if (!exceeded) reject(err);
+    });
   });
 }
 
@@ -956,7 +953,7 @@ export async function handleRequest(req, res) {
         for (const [k, v] of Object.entries(body.headers)) {
           const lk = k.toLowerCase().trim();
           if (typeof v === "string" && !HOP_BY_HOP.has(lk) && !lk.includes("\n") && !lk.includes("\r")) {
-            sanitizedHeaders[k] = v.replace(/[\r\n]+/g, " ");
+            sanitizedHeaders[lk] = v.replace(/[\r\n]+/g, " ");
           }
         }
       }
