@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, "feature/**" ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test Node ${{ matrix.node-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        node-version: [ 18.x, 20.x, 22.x ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Setup Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check coordinator.js
+          node --check sirelay.js
+
+      - name: Check Python installer syntax
+        run: |
+          python -m py_compile gen-installer.py
+
+      - name: Run test suite
+        run: |
+          npm test
