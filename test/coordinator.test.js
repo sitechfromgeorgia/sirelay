@@ -489,4 +489,133 @@ describe("SiRelay Coordinator Hardening & Features", () => {
     assert.equal(recoveredNode.jobsDone, 1);
     assert.equal(recoveredNode.jobsFailed, 1);
   });
+
+  test("Targeted sticky node routing: { node: '...' } routes specifically to target", async () => {
+    CONFIG.ALLOW_PRIVATE_IPS = true;
+    try {
+      // Ensure agent-alpha is online
+      nodes.set("agent-alpha", {
+        lastSeen: Date.now(),
+        jobsDone: 0,
+        jobsFailed: 0,
+        totalLatencyMs: 0,
+        lastJobTs: 0,
+      });
+
+      // Target an offline node -> fails fast with 503
+      const failRes = await fetch(`${baseUrl}/v1/fetch`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TEST_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: `http://127.0.0.1:${mockTargetPort}/article`,
+          node: "non-existent-node",
+        }),
+      });
+      assert.equal(failRes.status, 503);
+      const failData = await failRes.json();
+      assert.match(failData.error, /offline or unavailable/i);
+
+      // Target online agent-alpha -> succeeds
+      const pollPromise = fetch(`${baseUrl}/v1/agent/poll?node=agent-alpha`, {
+        headers: { Authorization: "Bearer key-alpha-1111" },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      const fetchPromise = fetch(`${baseUrl}/v1/fetch`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TEST_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: `http://127.0.0.1:${mockTargetPort}/article`,
+          node: "agent-alpha",
+        }),
+      });
+
+      const pollRes = await pollPromise;
+      const pollData = await pollRes.json();
+      assert.ok(pollData.job);
+
+      await fetch(`${baseUrl}/v1/agent/result`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer key-alpha-1111",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jobId: pollData.job.id,
+          ok: true,
+          status: 200,
+          bodyB64: Buffer.from("Sticky routing success").toString("base64"),
+        }),
+      });
+
+      const fetchRes = await fetchPromise;
+      assert.equal(fetchRes.status, 200);
+      const fetchData = await fetchRes.json();
+      assert.equal(fetchData.node, "agent-alpha");
+    } finally {
+      CONFIG.ALLOW_PRIVATE_IPS = false;
+    }
+  });
+
+  test("Agent departure beacon POST /v1/agent/bye marks node offline immediately", async () => {
+    // Set agent-alpha online
+    nodes.set("agent-alpha", {
+      lastSeen: Date.now(),
+      jobsDone: 0,
+      jobsFailed: 0,
+      totalLatencyMs: 0,
+      lastJobTs: 0,
+    });
+
+    const byeRes = await fetch(`${baseUrl}/v1/agent/bye?node=agent-alpha`, {
+      method: "POST",
+      headers: { Authorization: "Bearer key-alpha-1111" },
+    });
+    assert.equal(byeRes.status, 200);
+
+    const nodesRes = await fetch(`${baseUrl}/v1/nodes`, {
+      headers: { Authorization: `Bearer ${TEST_KEY}` },
+    });
+    const nodesData = await nodesRes.json();
+    const alpha = nodesData.nodes.find((n) => n.name === "agent-alpha");
+    assert.ok(alpha);
+    assert.equal(alpha.online, false); // Marked offline immediately with zero delay
+  });
+
+  test("Circuit breaker: Trips after 3 consecutive failures to prioritize healthy nodes", async () => {
+    nodes.clear();
+    const { pickLeastRecentlyUsedNode } = await import("../coordinator.js");
+    const now = Date.now();
+
+    // Node A has tripped circuit breaker (paused for 60s)
+    nodes.set("node-flaky", {
+      lastSeen: now,
+      jobsDone: 10,
+      jobsFailed: 3,
+      consecutiveFailures: 3,
+      circuitBreakerUntil: now + 60_000,
+      lastJobTs: now - 100_000, // Older job
+    });
+
+    // Node B is healthy
+    nodes.set("node-healthy", {
+      lastSeen: now,
+      jobsDone: 10,
+      jobsFailed: 0,
+      consecutiveFailures: 0,
+      circuitBreakerUntil: 0,
+      lastJobTs: now - 10_000, // Newer job
+    });
+
+    // Healthy node should be picked even though flaky has older lastJobTs
+    const picked = pickLeastRecentlyUsedNode();
+    assert.equal(picked, "node-healthy");
+  });
 });
+

@@ -358,13 +358,34 @@ export function getOnlineNodeNames() {
   return online;
 }
 
-/** Pick the least-recently-used online node */
-export function pickLeastRecentlyUsedNode() {
+/** Pick the best online node, respecting circuit breakers, load, and LRU */
+export function pickLeastRecentlyUsedNode(preferredNode = null) {
   const online = getOnlineNodeNames();
   if (!online.length) return null;
+
+  if (preferredNode) {
+    if (online.includes(preferredNode)) return preferredNode;
+    return null; // Preferred node is offline
+  }
+
+  const now = Date.now();
   online.sort((a, b) => {
-    const lastA = nodes.get(a)?.lastJobTs || 0;
-    const lastB = nodes.get(b)?.lastJobTs || 0;
+    const metaA = nodes.get(a) || {};
+    const metaB = nodes.get(b) || {};
+
+    // 1. Circuit breaker: healthy nodes first
+    const brokenA = (metaA.circuitBreakerUntil || 0) > now ? 1 : 0;
+    const brokenB = (metaB.circuitBreakerUntil || 0) > now ? 1 : 0;
+    if (brokenA !== brokenB) return brokenA - brokenB;
+
+    // 2. Least-loaded: fewer active in-flight jobs first
+    const activeA = metaA.activeJobs || 0;
+    const activeB = metaB.activeJobs || 0;
+    if (activeA !== activeB) return activeA - activeB;
+
+    // 3. LRU: older last-job timestamp first
+    const lastA = metaA.lastJobTs || 0;
+    const lastB = metaB.lastJobTs || 0;
     return lastA - lastB;
   });
   return online[0];
@@ -376,9 +397,17 @@ export function dispatchJob(job) {
 
   // Filter valid live waiters
   while (agentWaiters.length > 0) {
-    const targetNode = pickLeastRecentlyUsedNode();
-    let idx = agentWaiters.findIndex((w) => w.node === targetNode);
-    if (idx < 0) idx = 0; // Fallback to oldest waiter
+    const targetNode = pickLeastRecentlyUsedNode(job.requestedNode);
+    if (!targetNode) return; // Wait for target/healthy node
+
+    let idx = -1;
+    if (job.requestedNode) {
+      idx = agentWaiters.findIndex((w) => w.node === job.requestedNode);
+      if (idx < 0) return; // Wait until requested node polls
+    } else {
+      idx = agentWaiters.findIndex((w) => w.node === targetNode);
+      if (idx < 0) idx = 0; // Fallback to oldest waiter
+    }
 
     const waiter = agentWaiters.splice(idx, 1)[0];
     if (waiter.res.writableEnded || waiter.res.destroyed) {
@@ -391,15 +420,23 @@ export function dispatchJob(job) {
     job.attempts++;
 
     const nodeRecord = nodes.get(waiter.node);
-    if (nodeRecord) nodeRecord.lastJobTs = Date.now();
+    if (nodeRecord) {
+      nodeRecord.lastJobTs = Date.now();
+      nodeRecord.activeJobs = (nodeRecord.activeJobs || 0) + 1;
+    }
 
-    // Set an assignment lease timeout in case agent dies mid-fetch
+    // Adaptive visibility timeout: sized to client timeout (5s to 30s)
+    const leaseDuration = Math.min(
+      Math.max(job.timeoutMs - 3000, 5000),
+      CONFIG.AGENT_LEASE_TIMEOUT_MS || 25000
+    );
+
     if (job.leaseTimer) clearTimeout(job.leaseTimer);
     job.leaseTimer = setTimeout(() => {
       handleJobLeaseTimeout(job.id);
-    }, CONFIG.AGENT_LEASE_TIMEOUT_MS);
+    }, leaseDuration);
 
-    logger.info(`Dispatched job ${job.id} to node "${waiter.node}" (attempt ${job.attempts})`);
+    logger.info(`Dispatched job ${job.id} to node "${waiter.node}" (attempt ${job.attempts}, lease ${leaseDuration}ms)`);
     waiter.fire(job);
     return;
   }
@@ -411,10 +448,18 @@ function handleJobLeaseTimeout(jobId) {
 
   logger.warn(`Job ${jobId} lease expired on node "${job.assignedNode}"`);
 
-  // Record node failure for timing out
+  // Record node failure and trip circuit breaker if failing repeatedly
   if (job.assignedNode) {
     const n = nodes.get(job.assignedNode);
-    if (n) n.jobsFailed = (n.jobsFailed || 0) + 1;
+    if (n) {
+      if (n.activeJobs > 0) n.activeJobs--;
+      n.jobsFailed = (n.jobsFailed || 0) + 1;
+      n.consecutiveFailures = (n.consecutiveFailures || 0) + 1;
+      if (n.consecutiveFailures >= 3) {
+        n.circuitBreakerUntil = Date.now() + 60_000;
+        logger.warn(`Circuit breaker tripped for node "${job.assignedNode}" (3 consecutive failures; paused 60s)`);
+      }
+    }
   }
 
   // Can we retry?
@@ -455,11 +500,18 @@ export function cleanFinishJob(jobId, result) {
       };
       nodes.set(nodeName, nodeMeta);
     }
+    if (nodeMeta.activeJobs > 0) nodeMeta.activeJobs--;
     if (result.ok) {
       nodeMeta.jobsDone++;
+      nodeMeta.consecutiveFailures = 0;
+      nodeMeta.circuitBreakerUntil = 0;
       globalStats.totalCompleted++;
     } else {
       nodeMeta.jobsFailed++;
+      nodeMeta.consecutiveFailures = (nodeMeta.consecutiveFailures || 0) + 1;
+      if (nodeMeta.consecutiveFailures >= 3) {
+        nodeMeta.circuitBreakerUntil = Date.now() + 60_000;
+      }
       globalStats.totalFailed++;
     }
     nodeMeta.totalLatencyMs += durationMs;
@@ -946,6 +998,11 @@ export async function handleRequest(req, res) {
         return sendJson(res, 503, { ok: false, error: "no agents online" });
       }
 
+      const requestedNode = typeof body.node === "string" && body.node.trim() ? body.node.trim() : null;
+      if (requestedNode && !onlineNodes.includes(requestedNode)) {
+        return sendJson(res, 503, { ok: false, error: `requested node "${requestedNode}" is offline or unavailable` });
+      }
+
       // Clean request headers: remove hop-by-hop & control chars
       const sanitizedHeaders = {};
       if (body.headers && typeof body.headers === "object") {
@@ -971,6 +1028,7 @@ export async function handleRequest(req, res) {
         const job = {
           id,
           url,
+          requestedNode,
           opts: {
             method: (body.method || "GET").toUpperCase(),
             headers: sanitizedHeaders,
@@ -1158,6 +1216,27 @@ export async function handleRequest(req, res) {
         durationMs: body.ms || body.durationMs || (Date.now() - job.created),
       });
 
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // ===== Agent API: Graceful departure beacon (drain mode) =====
+    if (u.pathname === "/v1/agent/bye" && req.method === "POST") {
+      const node = u.searchParams.get("node") || authResult.node;
+      if (node && nodes.has(node)) {
+        const nodeRecord = nodes.get(node);
+        nodeRecord.lastSeen = 0; // Mark offline immediately
+        logger.info(`Agent "${node}" signaled graceful departure (drain/bye)`);
+
+        // Drain active long-poll waiters for this node
+        for (let i = agentWaiters.length - 1; i >= 0; i--) {
+          if (agentWaiters[i].node === node) {
+            const [w] = agentWaiters.splice(i, 1);
+            if (!w.res.writableEnded && !w.res.destroyed) {
+              w.res.writeHead(204).end();
+            }
+          }
+        }
+      }
       return sendJson(res, 200, { ok: true });
     }
 

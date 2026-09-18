@@ -194,21 +194,30 @@ async function submitResult(server, authHeader, jobId, result) {
 let isRunning = true;
 let activeController = null;
 
-function handleShutdown() {
+async function handleShutdown(cfg = null) {
   if (!isRunning) return;
   isRunning = false;
   console.log("\n[sirelay] Shutting down agent cleanly...");
   if (activeController) {
     activeController.abort();
   }
+  if (cfg && cfg.server && cfg.key) {
+    try {
+      await fetch(`${cfg.server}/v1/agent/bye?node=${encodeURIComponent(cfg.name)}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cfg.key}` },
+        signal: AbortSignal.timeout(1500),
+      });
+    } catch {}
+  }
   process.exit(0);
 }
 
 export async function main() {
-  process.on("SIGINT", handleShutdown);
-  process.on("SIGTERM", handleShutdown);
-
   const cfg = loadConfig();
+  const onSignal = () => handleShutdown(cfg);
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
   console.log(`[sirelay] v${VERSION} node="${cfg.name}" server=${cfg.server}`);
   await selfUpdate();
 
