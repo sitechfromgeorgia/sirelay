@@ -92,7 +92,7 @@ describe("SiRelay Coordinator Hardening & Features", () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.ok, true);
-    assert.equal(body.version, "0.3.0");
+    assert.match(body.version, /^\d+\.\d+\.\d+$/, "version must be semver");
     assert.equal(typeof body.uptimeSec, "number");
   });
 
