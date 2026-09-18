@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    name: Verify Release Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax & Lint check
+        run: |
+          node --check coordinator.js
+          node --check sirelay.js
+          python -m py_compile gen-installer.py
+
+      - name: Run test suite
+        run: |
+          npm test
+
+  publish:
+    name: Publish Release Asset
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify release asset exists
+        run: |
+          test -f sirelay.js || { echo "sirelay.js asset missing"; exit 1; }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: sirelay.js
+          generate_release_notes: true
+          draft: false
+          prerelease: false
