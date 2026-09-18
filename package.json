@@ -11,7 +11,7 @@
   "scripts": {
     "start": "node coordinator.js",
     "agent": "node sirelay.js",
-    "test": "node --test test/**/*.test.js",
+    "test": "node --test test/agent.test.js test/coordinator.test.js",
     "lint": "node --check coordinator.js sirelay.js"
   },
   "engines": {
