@@ -1,5 +1,22 @@
+# Agent & node secrets
 sirelay.config.json
-node_modules/
-*.log
+.sirelay-nodes.json
 installers/
-/root/.sirelay-nodes.json — PRIVATE, never commit
+
+# Dependencies
+node_modules/
+
+# Logs & persistent state
+*.log
+*.log.*
+sirelay-jobs.jsonl
+
+# Temporary and test artifacts
+*.tmp
+*.new
+test-results/
+.coverage
+
+# OS artifacts
+.DS_Store
+Thumbs.db
