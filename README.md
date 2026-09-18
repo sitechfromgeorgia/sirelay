@@ -156,9 +156,10 @@ All requests must provide authorization unless specified.
 
 | Endpoint | Method | Auth Role | Description |
 |---|---|---|---|
-| `/v1/fetch` | `POST` | Master Key | Dispatches an HTTP request to residential agents. Waits up to `timeoutMs` (default 25s). |
+| `/v1/fetch` | `POST` | Master Key | Dispatches an HTTP request to residential agents. Supports optional `node` (sticky routing) and `timeoutMs` (default 25s). |
 | `/v1/agent/poll?node=NAME` | `GET` | Agent Key | Long-poll request (up to 20s) held by coordinator until a job arrives. Sends node telemetry. |
 | `/v1/agent/result` | `POST` | Agent Key | Agent submits completed response status, headers, and base64 body. |
+| `/v1/agent/bye?node=NAME` | `POST` | Agent Key | Immediate agent departure beacon (drain mode); marks node offline with zero delay. |
 | `/v1/nodes` | `GET` | Master Key | Returns list of registered nodes, online status, telemetry, jobs done, and latencies. |
 | `/v1/stats` | `GET` | Master Key | Returns detailed queue stats, aggregate success rates, and recent jobs. |
 | `/v1/health` | `GET` | *Public* | Health status `{ ok: true, version, nodes, onlineNodes, uptimeSec }`. |
@@ -177,7 +178,8 @@ const response = await fetch("https://sirelay.yourdomain.com/v1/fetch", {
     url: "https://1tv.ge/news/12345",
     method: "GET",
     headers: { "Accept-Language": "ka-GE,ka;q=0.9" },
-    timeoutMs: 20000,
+    node: "home-laptop", // optional: sticky targeted routing to a specific machine
+    timeoutMs: 20000,     // optional: custom request timeout (2s - 60s)
   }),
 });
 

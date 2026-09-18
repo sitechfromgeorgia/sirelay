@@ -10,8 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **Production Hardening & Reliability**:
   - Graceful shutdown handling (`SIGTERM`, `SIGINT`, `SIGHUP`) with request draining and agent socket cleanup.
-  - Automatic re-queueing of fetch jobs if an assigned agent drops or disconnects mid-fetch.
+  - SQS-style adaptive visibility timeouts with automatic re-queueing of fetch jobs if an assigned agent drops mid-fetch.
   - Client request timeout (`timeoutMs`) support and client disconnect cancellation (`req.on("close")`).
+  - Peer circuit breaker tripping after 3 consecutive failures to isolate flaky residential nodes.
+  - Least-loaded + LRU hybrid scheduling to balance in-flight concurrency across residential peers.
+  - Targeted sticky node routing (`body.node` in `/v1/fetch`) for stateful residential sessions.
+  - Instant agent departure beacon (`POST /v1/agent/bye`, Tailscale drain pattern) taking disconnecting nodes offline with zero delay.
   - Zero-dependency rotating structured file logger with configurable log levels (`SIRELAY_LOG_LEVEL`) and size-capped rotation (`SIRELAY_LOG_FILE`).
   - Persistent job history (`sirelay-jobs.jsonl`, capped) with metrics recovery on coordinator restart.
 - **Security Enhancements**:
