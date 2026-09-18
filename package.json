@@ -1,0 +1,7 @@
+{
+  "name": "sirelay",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Personal residential fetch network — coordinator + cross-platform agent",
+  "engines": { "node": ">=18" }
+}
