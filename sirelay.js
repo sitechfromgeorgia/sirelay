@@ -3,75 +3,120 @@
  * SiRelay Agent — runs on any Windows / Linux / macOS machine.
  *
  *   1. Put sirelay.config.json next to this file:
- *      { "server": "http://YOUR_SERVER:8123", "key": "SECRET", "name": "edos-laptop" }
+ *      { "server": "http://YOUR_SERVER:8123", "key": "SECRET", "name": "residential-node" }
  *   2. Run:  node sirelay.js
  *
  * The agent long-polls the coordinator for fetch jobs, executes them from
  * THIS machine's IP (residential => bypasses datacenter blocks), and posts
- * results back. On startup it self-updates from GitHub Releases.
+ * results back. On startup it safely self-updates from GitHub Releases.
  *
- * Zero dependencies — Node 18+ only (global fetch).
+ * Zero external dependencies — Node 18+ standard library only.
  */
-import { readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import os from "node:os";
 
-const VERSION = "0.1.0";
-const REPO = "sitechfromgeorgia/sirelay"; // public repo: release asset "sirelay.js"
+export const VERSION = "0.3.0";
+const REPO = process.env.SIRELAY_REPO || "sitechfromgeorgia/sirelay";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ---------- config ----------
-function loadConfig() {
-  const p = path.join(__dirname, "sirelay.config.json");
-  if (!existsSync(p)) {
-    console.error(`[sirelay] create ${p} with {"server","key","name"?} — see README`);
+// ---------- Configuration ----------
+export function loadConfig() {
+  const configPath = path.join(__dirname, "sirelay.config.json");
+  let cfg = {};
+
+  if (existsSync(configPath)) {
+    try {
+      cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    } catch (err) {
+      console.error(`[sirelay] Invalid JSON in ${configPath}: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  // Allow environment variable overrides
+  cfg.server = process.env.SIRELAY_SERVER || cfg.server;
+  cfg.key = process.env.SIRELAY_KEY || cfg.key;
+  cfg.name = process.env.SIRELAY_NAME || cfg.name || os.hostname();
+
+  if (!cfg.server || !cfg.key) {
+    console.error(`[sirelay] Missing server or key. Create ${configPath} with {"server","key","name"} or set SIRELAY_SERVER and SIRELAY_KEY`);
     process.exit(1);
   }
-  const c = JSON.parse(readFileSync(p, "utf8"));
-  if (!c.server || !c.key) {
-    console.error("[sirelay] config needs server + key");
-    process.exit(1);
-  }
-  c.name = c.name || os.hostname();
-  return c;
+
+  // Normalize server URL (remove trailing slash)
+  cfg.server = cfg.server.replace(/\/+$/, "");
+  return cfg;
 }
 
-// ---------- self-update from GitHub Releases ----------
-async function selfUpdate() {
+// ---------- Safe Self-Update from GitHub Releases ----------
+export async function selfUpdate() {
   try {
     const r = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, {
-      headers: { "User-Agent": "sirelay-agent", Accept: "application/vnd.github+json" },
+      headers: {
+        "User-Agent": `sirelay-agent/${VERSION}`,
+        Accept: "application/vnd.github+json",
+      },
       signal: AbortSignal.timeout(8000),
     });
-    if (!r.ok) return; // no releases yet / offline — fine
+    if (!r.ok) return; // Release not found or offline/rate-limited
+
     const rel = await r.json();
-    const latest = (rel.tag_name || "").replace(/^v/, "");
+    const latest = (rel.tag_name || "").replace(/^v/, "").trim();
     if (!latest || latest === VERSION) return;
+
     const asset = (rel.assets || []).find((a) => a.name === "sirelay.js");
-    if (!asset) return;
-    console.log(`[sirelay] update ${VERSION} -> ${latest}, downloading…`);
-    const code = await (await fetch(asset.browser_download_url, { signal: AbortSignal.timeout(20000) })).text();
-    if (!code.includes("SiRelay Agent") || code.length < 2000) throw new Error("bad download");
+    if (!asset || !asset.browser_download_url) return;
+
+    console.log(`[sirelay] Update found: v${VERSION} -> v${latest}, downloading...`);
+    const resp = await fetch(asset.browser_download_url, {
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) throw new Error(`Download failed: HTTP ${resp.status}`);
+    const code = await resp.text();
+
+    if (!code.includes("SiRelay Agent") || code.length < 2000) {
+      throw new Error("Downloaded asset failed verification checks");
+    }
+
     const self = path.join(__dirname, "sirelay.js");
-    writeFileSync(self + ".new", code);
-    renameSync(self + ".new", self);
-    console.log("[sirelay] updated, restarting…");
-    spawn(process.execPath, [self], { detached: true, stdio: "inherit" }).unref();
+    const tmp = `${self}.tmp.${Date.now()}`;
+    writeFileSync(tmp, code, { mode: 0o755 });
+
+    // Validate syntax before replacing
+    const check = spawnSync(process.execPath, ["--check", tmp], { encoding: "utf8" });
+    if (check.status !== 0) {
+      try { unlinkSync(tmp); } catch {}
+      throw new Error(`Downloaded code failed syntax verification: ${check.stderr}`);
+    }
+
+    renameSync(tmp, self);
+    console.log("[sirelay] Successfully updated agent script. Respawning...");
+
+    spawn(process.execPath, [self], {
+      detached: true,
+      stdio: "inherit",
+    }).unref();
+
     process.exit(0);
-  } catch (e) {
-    console.log("[sirelay] update check failed (continuing):", e.message);
+  } catch (err) {
+    console.log(`[sirelay] Self-update check skipped (${err.message})`);
   }
 }
 
-// ---------- fetch job execution ----------
+// ---------- Fetch Job Execution ----------
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-async function runJob(job) {
+export async function runJob(job, signal = null) {
   const started = Date.now();
   try {
+    const combinedSignal = signal
+      ? AbortSignal.any([AbortSignal.timeout(30_000), signal])
+      : AbortSignal.timeout(30_000);
+
     const resp = await fetch(job.url, {
       method: job.opts?.method || "GET",
       headers: {
@@ -81,11 +126,15 @@ async function runJob(job) {
         ...(job.opts?.headers || {}),
       },
       redirect: "follow",
-      signal: AbortSignal.timeout(30_000),
+      signal: combinedSignal,
     });
+
     const buf = Buffer.from(await resp.arrayBuffer());
     const headers = {};
-    resp.headers.forEach((v, k) => (headers[k] = v));
+    resp.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+
     return {
       ok: resp.ok,
       status: resp.status,
@@ -93,51 +142,137 @@ async function runJob(job) {
       bodyB64: buf.subarray(0, 8 * 1024 * 1024).toString("base64"),
       ms: Date.now() - started,
     };
-  } catch (e) {
-    return { ok: false, status: 0, headers: {}, bodyB64: "", error: e.message, ms: Date.now() - started };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      headers: {},
+      bodyB64: "",
+      error: err.message,
+      ms: Date.now() - started,
+    };
   }
 }
 
-// ---------- main loop ----------
-async function main() {
+// ---------- Post Result with Retries ----------
+async function submitResult(server, authHeader, jobId, result) {
+  const maxRetries = 2;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`${server}/v1/agent/result`, {
+        method: "POST",
+        headers: {
+          ...authHeader,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ jobId, ...result }),
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (res.status === 404) {
+        console.warn(`[sirelay] Job #${jobId} was expired or coordinator restarted; discarded`);
+        return true;
+      }
+
+      if (res.ok) {
+        return true;
+      }
+
+      console.warn(`[sirelay] Result submission HTTP ${res.status}, attempt ${attempt + 1}/${maxRetries + 1}`);
+    } catch (err) {
+      console.warn(`[sirelay] Result submission network error: ${err.message}, attempt ${attempt + 1}/${maxRetries + 1}`);
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  return false;
+}
+
+// ---------- Main Agent Polling Loop ----------
+let isRunning = true;
+let activeController = null;
+
+function handleShutdown() {
+  if (!isRunning) return;
+  isRunning = false;
+  console.log("\n[sirelay] Shutting down agent cleanly...");
+  if (activeController) {
+    activeController.abort();
+  }
+  process.exit(0);
+}
+
+export async function main() {
+  process.on("SIGINT", handleShutdown);
+  process.on("SIGTERM", handleShutdown);
+
   const cfg = loadConfig();
   console.log(`[sirelay] v${VERSION} node="${cfg.name}" server=${cfg.server}`);
   await selfUpdate();
 
-  const auth = { Authorization: `Bearer ${cfg.key}` };
+  const authHeader = { Authorization: `Bearer ${cfg.key}` };
   let failures = 0;
 
-  for (;;) {
+  while (isRunning) {
+    activeController = new AbortController();
     try {
-      const r = await fetch(
-        `${cfg.server}/v1/agent/poll?node=${encodeURIComponent(cfg.name)}`,
-        { headers: auth, signal: AbortSignal.timeout(25_000) }
-      );
+      // Build heartbeat query parameters
+      const params = new URLSearchParams({
+        node: cfg.name,
+        version: VERSION,
+        os: `${process.platform}-${process.arch}`,
+        uptime: String(Math.floor(process.uptime())),
+      });
+
+      const pollUrl = `${cfg.server}/v1/agent/poll?${params.toString()}`;
+      const r = await fetch(pollUrl, {
+        headers: authHeader,
+        signal: AbortSignal.any([AbortSignal.timeout(25_000), activeController.signal]),
+      });
+
       failures = 0;
-      if (r.status === 204) continue; // no work
+
+      if (r.status === 204) {
+        // Long-poll timeout with no jobs; continue immediately
+        continue;
+      }
+
       if (!r.ok) {
-        console.error("[sirelay] poll", r.status);
+        console.error(`[sirelay] Poll received HTTP ${r.status}`);
         await new Promise((s) => setTimeout(s, 5000));
         continue;
       }
-      const { job } = await r.json();
+
+      const data = await r.json();
+      const job = data?.job;
       if (!job) continue;
-      process.stdout.write(`[sirelay] fetch ${job.url.slice(0, 90)} … `);
-      const result = await runJob(job);
-      console.log(`${result.status} in ${result.ms}ms`);
-      await fetch(`${cfg.server}/v1/agent/result`, {
-        method: "POST",
-        headers: { ...auth, "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: job.id, ...result }),
-        signal: AbortSignal.timeout(15_000),
-      });
-    } catch (e) {
+
+      const urlPreview = job.url.length > 80 ? job.url.slice(0, 80) + "…" : job.url;
+      process.stdout.write(`[sirelay] Executing job #${job.id}: ${urlPreview} … `);
+
+      const result = await runJob(job, activeController.signal);
+      console.log(`${result.status || "ERR"} in ${result.ms}ms`);
+
+      await submitResult(cfg.server, authHeader, job.id, result);
+    } catch (err) {
+      if (!isRunning) break;
+
       failures++;
-      const wait = Math.min(30_000, 1000 * 2 ** failures);
-      console.error(`[sirelay] ${e.message}; retry in ${wait / 1000}s`);
+      // Exponential backoff with random jitter to avoid thundering herd
+      const baseWait = Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
+      const jitter = 0.8 + Math.random() * 0.4;
+      const wait = Math.round(baseWait * jitter);
+
+      console.error(`[sirelay] Connection error (${err.message}); retrying in ${(wait / 1000).toFixed(1)}s`);
       await new Promise((s) => setTimeout(s, wait));
+    } finally {
+      activeController = null;
     }
   }
 }
 
-main();
+if (process.env.NODE_ENV !== "test") {
+  main();
+}

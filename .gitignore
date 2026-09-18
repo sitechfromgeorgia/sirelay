@@ -5,6 +5,7 @@ installers/
 
 # Dependencies
 node_modules/
+__pycache__/
 
 # Logs & persistent state
 *.log
