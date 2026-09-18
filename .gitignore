@@ -1,3 +1,5 @@
 sirelay.config.json
 node_modules/
 *.log
+installers/
+/root/.sirelay-nodes.json — PRIVATE, never commit
