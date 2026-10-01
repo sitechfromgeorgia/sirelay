@@ -42,3 +42,7 @@ jobs:
       - name: Run test suite
         run: |
           npm test
+      - name: Test tbilisi.today Linux laptop updater
+        if: runner.os == 'Linux'
+        run: |
+          python -B integrations/tbilisi-today/test_updater.py
