@@ -1,0 +1,7 @@
+[Unit]
+Description=Update tbilisi.today laptop scripts from SiRelay
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.sitech/update_tt_relay.py

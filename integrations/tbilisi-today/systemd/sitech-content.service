@@ -1,0 +1,7 @@
+[Unit]
+Description=tbilisi.today missing article text from residential laptop
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.sitech/content_fetch.py

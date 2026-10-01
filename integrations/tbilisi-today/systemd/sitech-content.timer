@@ -1,0 +1,10 @@
+[Unit]
+Description=Fetch missing tbilisi.today article texts every 10 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,6 @@
+[Unit]
+Description=SiTech og:image fetcher (blocked sources, residential IP)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.sitech/og_fetch.py

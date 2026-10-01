@@ -1,0 +1,6 @@
+[Unit]
+Description=SiTech residential fetcher (pushes bot-blocked sources to tt-ingest)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.sitech/push_sources.py

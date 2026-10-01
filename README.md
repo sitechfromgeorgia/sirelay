@@ -12,6 +12,15 @@
 ---
 
 <a name="english"></a>
+## tbilisi.today residential integration
+
+Linux Mint news-listing, image and article-text workers live under
+[`integrations/tbilisi-today/`](integrations/tbilisi-today/README.md). The scripts reuse
+the laptop's existing `~/.sitech/push_key`; the hourly user timer updates only this
+integration from the SiRelay repository. The SiRelay coordinator and agent remain separate.
+
+---
+
 ## English
 
 ### What is SiRelay?

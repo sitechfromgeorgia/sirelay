@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the SiTech blocked-image relay every 5 minutes
+
+[Timer]
+OnBootSec=8min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

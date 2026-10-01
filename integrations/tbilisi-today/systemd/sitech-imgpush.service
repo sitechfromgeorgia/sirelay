@@ -1,0 +1,6 @@
+[Unit]
+Description=SiTech blocked-image relay (residential IP -> tt-web /img-put)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.sitech/img_push.py
