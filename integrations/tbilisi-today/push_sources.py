@@ -8,10 +8,14 @@ Fetch modes:
             Cloudflare JS challenge ("Just a moment...")
 
 Runs every 10 minutes via systemd user timer (sitech-push.timer).
+Also bridges sitech.ge: pushes cybernews.com items to the sitech-crawler /ingest
+(~every 30 min, chromium browser mode - see the sitech.ge section below).
 """
+import datetime
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -40,6 +44,86 @@ SOURCES = {
 DELAY_BETWEEN = 15   # seconds between sources
 RETRY_AFTER = 45     # seconds before retrying a failed source
 BROWSER_BUDGET = 30000  # ms of virtual time for the JS challenge
+
+# ───────── sitech.ge crawler bridge (added 2026-10-04) ─────────
+# cybernews.com answers every datacenter/non-browser client with a Cloudflare challenge;
+# the sitech-crawler worker cannot fetch it. This machine CAN (chromium passes), so the
+# news sitemap + homepage are fetched here and items are pushed to the crawler's /ingest.
+SITECH_INGEST = "https://crawler.sitech.ge/ingest"
+CN_SECTIONS = ("news", "privacy", "security", "ai", "cyber-war", "crypto", "tech",
+               "gaming", "gadgets", "science", "editorial", "cybercrime")
+
+
+def parse_cybernews_sitemap(xml: str):
+    items = []
+    for block in re.findall(r"<url>(.*?)</url>", xml, re.S)[:40]:
+        loc = re.search(r"<loc>([^<]+)</loc>", block)
+        title = re.search(r"<news:title>([^<]+)</news:title>", block)
+        date = re.search(r"<news:publication_date>([^<]+)</news:publication_date>", block)
+        if not loc:
+            continue
+        url = loc.group(1).strip()
+        parts = url.split("/")
+        if len(parts) < 6 or parts[3] not in CN_SECTIONS or not url.endswith("/"):
+            continue
+        t = title.group(1).strip() if title else ""
+        if not t:
+            t = " ".join(w.capitalize() for w in url.rstrip("/").split("/")[-1].split("-"))
+        items.append({"title": t, "link": url, "date": date.group(1).strip() if date else ""})
+    return items
+
+
+def parse_cybernews_home(html: str):
+    items, seen = [], set()
+    pat = r'href="(https://cybernews\.com/(?:' + "|".join(CN_SECTIONS) + r')/[a-z0-9-]+/)"[^>]*>([^<]{10,200})</a>'
+    for m in re.finditer(pat, html):
+        url, text = m.group(1), re.sub(r"\s+", " ", m.group(2)).strip()
+        if url in seen:
+            continue
+        seen.add(url)
+        text = re.sub(r"\s+[A-Z][a-z]{2}\s+\d{1,2}(\s+\d+ min read)?\s*$", "", text).strip()
+        if len(text) > 10:
+            items.append({"title": text, "link": url})
+        if len(items) >= 40:
+            break
+    return items
+
+
+def push_cybernews() -> str:
+    first_err = ""
+    items = []
+    try:
+        items = parse_cybernews_sitemap(fetch_browser("https://cybernews.com/news-sitemap.xml"))
+    except Exception as exc:  # noqa: BLE001
+        first_err = f"{type(exc).__name__}: {str(exc)[:80]}"
+    if len(items) < 3:
+        try:
+            home = parse_cybernews_home(fetch_browser("https://cybernews.com/"))
+            if home:
+                items = home
+        except Exception as exc2:  # noqa: BLE001
+            return f"cybernews: FAILED sitemap({first_err}) home({type(exc2).__name__}: {str(exc2)[:80]})"
+    if not items:
+        return f"cybernews: FAILED no items (sitemap err: {first_err or 'empty'})"
+    body = json.dumps({"source": "cybernews", "items": items}).encode("utf-8")
+    try:
+        cn_key = open(os.path.expanduser("~/.sitech/crawler_run_key"), encoding="utf-8").read().strip()
+    except OSError:
+        cn_key = ""
+    proc = subprocess.run(
+        ["curl", "-sS", "--compressed", "--max-time", "90", "-X", "POST",
+         "-H", "Content-Type: application/json",
+         "-H", f"x-run-key: {cn_key}",
+         "--data-binary", "@-", SITECH_INGEST],
+        input=body, capture_output=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        return f"cybernews: ingest curl exit {proc.returncode}"
+    try:
+        res = json.loads(proc.stdout.decode("utf-8", errors="ignore"))
+    except json.JSONDecodeError:
+        return f"cybernews: bad ingest response {proc.stdout[:100]!r}"
+    return f"cybernews[browser]: items={len(items)} upserted={res.get('upserted')} ok={res.get('ok')}"
 
 
 def key() -> str:
@@ -133,6 +217,15 @@ def push(slug: str, html: str) -> dict:
 
 
 def main() -> int:
+    if "--cybernews" in sys.argv:
+        line = push_cybernews()
+        print(line)
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+        return 0 if "FAILED" not in line else 1
     lines = []
     ok = 0
     items = list(SOURCES.items())
@@ -156,6 +249,10 @@ def main() -> int:
             ok += 1
         except Exception as exc:  # noqa: BLE001
             lines.append(f"{slug}: push ERROR {type(exc).__name__}: {str(exc)[:90]}")
+    cn_line = ""
+    if datetime.datetime.now().minute % 30 < 10:
+        cn_line = push_cybernews()
+        lines.append(cn_line)
     out = "\n".join(lines)
     print(out)
     try:
@@ -163,7 +260,7 @@ def main() -> int:
             fh.write(out + "\n")
     except OSError:
         pass
-    return 0 if ok == len(SOURCES) else 1
+    return 0 if ok == len(SOURCES) and "FAILED" not in cn_line else 1
 
 
 if __name__ == "__main__":
