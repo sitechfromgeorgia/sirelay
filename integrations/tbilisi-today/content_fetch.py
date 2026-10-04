@@ -130,17 +130,56 @@ def norm(s: str) -> str:
     return re.sub(r"[ \t\u00a0]+", " ", s).replace("\u200b", "").strip()
 
 
-CONTAINERS = (
-    r"<article\b[^>]*>(.*?)</article>",
-    r"<div[^>]+itemprop=[\"']articleBody[\"'][^>]*>(.*?)</div>",
-    r"<div[^>]+class=[\"'][^\"']*(?:article|entry|post|news|story)[-_ ]?(?:body|content|text|detail|inner|descr)[^\"']*[\"'][^>]*>(.*?)</div>",
-    r"<main\b[^>]*>(.*?)</main>",
+def clean_html(html: str) -> str:
+    """Strip the non-content layers BEFORE container scanning. Scripts inside ad zones carry
+    '<div' strings that break depth counting, and their text masquerades as candidates."""
+    s = html
+    for pat in (
+        r"<script\b[\s\S]*?</script>",
+        r"<style\b[\s\S]*?</style>",
+        r"<noscript\b[\s\S]*?</noscript>",
+        r"<svg\b[\s\S]*?</svg>",
+        r"<!--[\s\S]*?-->",
+    ):
+        s = re.sub(pat, " ", s, flags=re.I)
+    return s
+
+
+def balanced_div(html: str, start: int) -> str:
+    """html[start:] runs from just after a <div ...> opening tag to its MATCHING </div>.
+
+    The lazy `(.*?)</div>` in the container patterns stopped at the FIRST nested close, so a
+    real article wrapper (maincontent__newsdetail on tvpirveli) matched 133 chars, lost the
+    longest-match contest to <main>, and the extraction stored a soup of sidebar card
+    descriptions instead of the article (found 2026-10-04, Edo: a wrong article inside a
+    story). Depth counting returns the whole region."""
+    depth = 1
+    for m in re.finditer(r"<(/?)div\b", html[start:], re.I):
+        depth += -1 if m.group(1) == "/" else 1
+        if depth == 0:
+            return html[start:start + m.start()]
+    return html[start:]
+
+
+# Class-matched article wrappers, used ONLY after <article>/itemprop miss. Priority is fixed:
+# article -> itemprop -> class wrapper -> <main>. Longest-match across ALL patterns let <main>
+# (the whole app, stream cards included) win and produce multi-story soup.
+DIV_CLASS_PAT = (
+    r"<div[^>]+class=[\"'][^\"']*(?:article|entry|post|news|story)[-_ ]?"
+    r"(?:body|content|text|detail|inner|descr)[^\"']*[\"'][^>]*>"
 )
 
 
 def paras(fragment: str) -> list:
     out = []
     for m in re.finditer(r"<p\b[^>]*>(.*?)</p>", fragment, re.S | re.I):
+        open_tag = m.group(0)[: m.group(0).find(">") + 1]
+        # Card/widget description paragraphs are OTHER articles' teasers (tvpirveli's
+        # `tvpcard__description` cards sit inside the article wrapper and leaked into bodies,
+        # found 2026-10-04 with a wrong story membership). Never article body; skip before
+        # the length filter so a short card bullet cannot resurrect either.
+        if re.search(r"tvpcard|teaser|card__", open_tag, re.I):
+            continue
         t = norm(strip_tags(m.group(1)))
         if len(t) >= 40 and (not out or out[-1] != t):
             out.append(t)
@@ -169,16 +208,32 @@ def cut_teasers(text: str) -> str:
 
 
 def article_text(html: str):
-    """-> (text, strategy). Containers first, then whole-document paragraph runs."""
+    """-> (text, strategy). Priority order, each step gated:
+    <article> -> itemprop -> class wrapper (nested-aware) -> <main> -> whole-document runs."""
+    html_c = clean_html(html)
     best, best_pat = "", ""
-    for pat in CONTAINERS:
-        for m in re.finditer(pat, html, re.S | re.I):
-            cand = "\n\n".join(paras(m.group(1)))
-            if len(cand) > len(best):
-                best, best_pat = cand, "container"
+
+    def take(region: str, kind: str) -> None:
+        nonlocal best, best_pat
+        cand = "\n\n".join(paras(region))
+        if len(cand) > len(best):
+            best, best_pat = cand, kind
+
+    for pat in (
+        r"<article\b[^>]*>(.*?)</article>",
+        r"<div[^>]+itemprop=[\"']articleBody[\"'][^>]*>(.*?)</div>",
+    ):
+        for m in re.finditer(pat, html_c, re.S | re.I):
+            take(m.group(1), "container")
+    if len(best) < MIN_CHARS:
+        for m in re.finditer(DIV_CLASS_PAT, html_c, re.S | re.I):
+            take(balanced_div(html_c, m.end()), "container")
+    if len(best) < MIN_CHARS:
+        for m in re.finditer(r"<main\b[^>]*>(.*?)</main>", html_c, re.S | re.I):
+            take(m.group(1), "container")
     if len(best) >= MIN_CHARS:
         return cut_teasers(best)[:MAX_CHARS], best_pat
-    ps = paras(html)
+    ps = paras(html_c)
     if not ps:
         return "", "none"
     run = "\n\n".join(best_run(ps))
